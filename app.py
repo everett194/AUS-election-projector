@@ -1,10 +1,12 @@
 import streamlit as st
+import numpy as np
 
-st.set_page_config(page_title="NT Election RCV Simulator", layout="centered")
+st.set_page_config(page_title="NT Election Monte Carlo RCV", layout="centered")
 
-st.title("Northern Territory Election RCV Projection")
+st.title("NT Election RCV Projection (Monte Carlo Simulation)")
 st.write("Adjust first-preference votes for each party. The app simulates "
-         "ranked-choice voting (preferential voting) and projects the final winner.")
+         "ranked-choice voting (preferential voting) 10,000 times with random "
+         "preference flows and shows the probability of each party winning.")
 
 # --- First preference sliders ---
 labor = st.slider("Labor (%)", 0, 100, 35)
@@ -38,57 +40,62 @@ votes = {k: (v / total) * 100 for k, v in votes.items()}
 st.subheader("Normalized First Preferences")
 st.write({k: f"{v:.1f}%" for k, v in votes.items()})
 
-# --- Preference flow rules ---
-def transfer(eliminated, active):
-    """Return how eliminated candidate’s votes transfer to remaining parties."""
+# --- Base preference flows (means, from history/assumptions) ---
+base_flows = {
+    "Greens": {"Labor": 0.85, "CLP": 0.15},
+    "One Nation": {"CLP": 0.75, "Labor": 0.25},
+    "UAP": {"CLP": 0.64, "Labor": 0.36},
+    "Lib Dems": {"CLP": 0.73, "Labor": 0.27},
+    "Independent": {"Labor": 0.67, "CLP": 0.33},
+    "Citizens": {"Labor": 0.56, "CLP": 0.44},
+}
+
+def sample_flows(eliminated, active):
+    """Sample a random flow distribution for eliminated candidate."""
+    if eliminated not in base_flows:
+        # Even split if no rule
+        return {a: 1/len(active) for a in active}
     flows = {}
-    if eliminated == "Greens":
-        flows["Labor"] = 0.85; flows["CLP"] = 0.15
-    elif eliminated == "One Nation":
-        flows["CLP"] = 0.75; flows["Labor"] = 0.25
-    elif eliminated == "UAP":
-        flows["CLP"] = 0.64; flows["Labor"] = 0.36
-    elif eliminated == "Lib Dems":
-        flows["CLP"] = 0.73; flows["Labor"] = 0.27
-    elif eliminated == "Independent":
-        flows["Labor"] = 0.67; flows["CLP"] = 0.33
-    elif eliminated == "Citizens":
-        flows["Labor"] = 0.56; flows["CLP"] = 0.44
-    else:
-        # Even distribution if no specific rule
-        flows = {a: 1 / len(active) for a in active}
-    # Keep only active parties
-    flows = {a: flows.get(a, 0) for a in active}
-    total_flow = sum(flows.values())
-    if total_flow > 0:
-        flows = {k: v / total_flow for k, v in flows.items()}
+    remaining = [a for a in base_flows[eliminated] if a in active]
+    if not remaining:
+        return {a: 1/len(active) for a in active}
+    probs = [base_flows[eliminated][a] for a in remaining]
+    probs = np.array(probs) / np.sum(probs)
+    # Add randomness with Dirichlet distribution (like noisy proportions)
+    noisy = np.random.dirichlet(probs*20)  # larger factor = less random
+    for cand, p in zip(remaining, noisy):
+        flows[cand] = p
     return flows
 
-# --- RCV elimination rounds ---
-active = set(votes.keys())
-rounds = []
-while True:
-    remaining_total = sum(votes[c] for c in active)
-    leader = max(active, key=lambda c: votes[c])
-    if votes[leader] > 50:
-        winner = leader
-        break
-    # Eliminate lowest
-    loser = min(active, key=lambda c: votes[c])
-    eliminated_votes = votes[loser]
-    active.remove(loser)
-    # Transfer eliminated votes
-    flows = transfer(loser, active)
-    for cand, frac in flows.items():
-        votes[cand] += eliminated_votes * frac
-    rounds.append((loser, eliminated_votes, flows.copy()))
+def run_rcv_sim(votes):
+    """Run one RCV simulation with random flows. Return the winner."""
+    votes = votes.copy()
+    active = set(votes.keys())
+    while True:
+        # Check majority
+        remaining_total = sum(votes[c] for c in active)
+        leader = max(active, key=lambda c: votes[c])
+        if votes[leader] > 50:
+            return leader
+        # Eliminate lowest
+        loser = min(active, key=lambda c: votes[c])
+        eliminated_votes = votes[loser]
+        active.remove(loser)
+        # Transfer with random noise
+        flows = sample_flows(loser, active)
+        for cand, frac in flows.items():
+            votes[cand] += eliminated_votes * frac
 
-# --- Display results ---
-st.subheader("Elimination Rounds")
-for i, (loser, eliminated_votes, flows) in enumerate(rounds, start=1):
-    st.write(f"**Round {i}**: Eliminated {loser} "
-             f"({eliminated_votes:.1f}% of vote).")
-    st.write(f"Transferred: " + ", ".join([f"{cand} +{eliminated_votes*frac:.1f}%" 
-                                          for cand, frac in flows.items()]))
+# --- Monte Carlo simulation ---
+N = 10000
+winners = [run_rcv_sim(votes) for _ in range(N)]
+unique, counts = np.unique(winners, return_counts=True)
+probs = {u: c/N*100 for u, c in zip(unique, counts)}
 
-st.success(f"🏆 Final Winner: **{winner}** with {votes[winner]:.1f}% of the vote")
+st.subheader("Win Probabilities")
+for party in sorted(probs, key=probs.get, reverse=True):
+    st.write(f"{party}: {probs[party]:.1f}%")
+
+# Highlight most likely winner
+likely = max(probs, key=probs.get)
+st.success(f"🏆 Most likely winner: {likely}")
