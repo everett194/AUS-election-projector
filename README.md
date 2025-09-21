@@ -1,1 +1,0 @@
-# AUS-election-projector
